@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120" viewBox="0 0 240 120" role="img" aria-label="Lakeside Workshop logo">
+  <rect width="240" height="120" fill="#f4efe6"/>
+  <path d="M20 88 L70 44 L120 88 Z" fill="none" stroke="#3f5d54" stroke-width="4"/>
+  <path d="M92 88 L140 52 L188 88 Z" fill="none" stroke="#3f5d54" stroke-width="3"/>
+  <text x="120" y="108" font-family="Georgia, serif" font-size="13" text-anchor="middle" fill="#3f5d54">LAKESIDE WORKSHOP</text>
+</svg>

@@ -1,0 +1,7 @@
+part,length_mm,width_mm,thickness_mm,qty,stock
+Upright,1980,30,220,8,white oak
+Shelf,1180,30,280,9,white oak
+Deep shelf (left bay),1180,30,380,3,white oak
+Face frame rail,1180,22,60,6,white oak
+Face frame stile,1980,22,60,8,white oak
+Back panel batten,1180,18,40,6,poplar

@@ -1,0 +1,53 @@
+# tester-env compose file for Backrest (single service, no database/worker).
+#
+# The tester-env CLI is the supported entry point; it supplies IMAGE_TAG,
+# CONTAINER_NAME, COMPOSE_PROJECT_NAME, PORT and the seed settings below.
+# Direct `docker compose up --build` also works with the defaults (port 9898).
+#
+# All state is in named volumes so `docker compose down -v` is the reset gate:
+#   <project>_backrest-config  -> /config (config.json + JWT signing key + ssh keys)
+#   <project>_backrest-data    -> /data   (oplog.sqlite, process logs)
+#   <project>_backrest-cache   -> /cache   (restic cache; XDG_CACHE_HOME)
+#   <project>_backrest-repos   -> /repos   (local restic repository)
+# /fixtures and /restore live in the image and are recreated by every deploy.
+
+name: ${COMPOSE_PROJECT_NAME:-tester-env-backrest}
+
+services:
+  backrest:
+    build:
+      context: .
+      dockerfile: Dockerfile.tester-env
+    image: ${IMAGE_TAG:-tester-env-backrest:dev}
+    container_name: ${CONTAINER_NAME:-tester-env-backrest}
+    environment:
+      # Defaults mirrored from upstream cmd/docker-entrypoint/main.go.
+      BACKREST_PORT: 0.0.0.0:9898
+      BACKREST_DATA: /data
+      BACKREST_CONFIG: /config/config.json
+      XDG_CACHE_HOME: /cache
+      TMPDIR: /tmp
+      # Pinned restic from the image; stops the first-run download path
+      # (resticinstaller) so runtime is offline and deterministic.
+      BACKREST_RESTIC_COMMAND: /usr/local/bin/restic
+      TZ: UTC
+    ports:
+      - "${PORT:-9898}:9898"
+    volumes:
+      - backrest-config:/config
+      - backrest-data:/data
+      - backrest-cache:/cache
+      - backrest-repos:/repos
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9898/"]
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 12
+    restart: "no"
+
+volumes:
+  backrest-config:
+  backrest-data:
+  backrest-cache:
+  backrest-repos:

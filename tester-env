@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Backrest - Tester Environment CLI
+# Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+# Commands: deploy, seed, verify, reset, stop, logs, status, url, help
+
+RUN_ID="default"
+PORT="9898"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tester-env.yml"
+
+# Deterministic setup documented in status/apps/backrest.toml and DEPLOY-SMA.md.
+INSTANCE_NAME="lakeside-workshop"
+ADMIN_USER="admin"
+ADMIN_PASSWORD="BackrestAdmin!2026"
+# Repo ids/URIs mirrored from tester-env-seed.py (REPOS); verify checks both
+# restic repositories exist on disk inside the container.
+REPO_URIS=("/repos/workshop-nas" "/repos/cold-archive")
+
+refresh_names() {
+    local suffix=""
+    if [[ "${RUN_ID}" != "default" ]]; then
+        suffix="-${RUN_ID}"
+    fi
+
+    CONTAINER_NAME="tester-env-backrest${suffix}"
+    # IMAGE_TAG set by scripts/rl-env to a content-addressed tag so identical
+    # (baseline, patch-set) combos share an image. Manual invocations get :dev.
+    IMAGE_NAME="${IMAGE_TAG:-tester-env-backrest:dev}"
+    COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-tester-env-backrest${suffix}}"
+}
+
+compose() {
+    docker compose \
+        -p "${COMPOSE_PROJECT}" \
+        -f "${COMPOSE_FILE}" \
+        --project-directory "${SCRIPT_DIR}" \
+        "$@"
+}
+
+compose_env() {
+    COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT}" \
+    CONTAINER_NAME="${CONTAINER_NAME}" \
+    IMAGE_TAG="${IMAGE_NAME}" \
+    PORT="${PORT}" \
+    compose "$@"
+}
+
+seed_env() {
+    BACKREST_BASE_URL="http://127.0.0.1:${PORT}" \
+    BACKREST_INSTANCE_NAME="${INSTANCE_NAME}" \
+    BACKREST_ADMIN_USER="${ADMIN_USER}" \
+    BACKREST_ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+    python3 "${SCRIPT_DIR}/tester-env-seed.py" "$@"
+}
+
+wait_for_health() {
+    local attempt
+    for attempt in $(seq 1 90); do
+        if curl -sf "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
+            echo "==> App healthy after ${attempt}s"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Error: app did not become healthy at http://127.0.0.1:${PORT}/" >&2
+    compose_env logs --tail 80 >&2 || true
+    exit 1
+}
+
+cmd_deploy() {
+    echo "==> Building image from source: ${IMAGE_NAME}..."
+    echo "    (cold build: pnpm install + vite bundle, Go module download + CGO-free build, pinned restic download)"
+
+    echo "==> Starting container ${CONTAINER_NAME} on port ${PORT}..."
+    compose_env up -d --build
+
+    wait_for_health
+    cmd_seed --quiet
+
+    echo "==> Deployment complete."
+    echo "    URL:      http://localhost:${PORT}/"
+    echo "    Browser:  ${TESTER_ENV_BROWSER_ORIGIN:-http://host.docker.internal:${PORT}/}"
+    echo "    Login:    ${ADMIN_USER} / ${ADMIN_PASSWORD}"
+}
+
+require_running() {
+    if ! compose_env ps --status running --format '{{.Name}}' 2>/dev/null | grep -qx "${CONTAINER_NAME}"; then
+        echo "Error: container ${CONTAINER_NAME} is not running. Run './tester-env deploy' first." >&2
+        exit 1
+    fi
+}
+
+cmd_seed() {
+    local quiet="${1:-}"
+    require_running
+
+    [[ "${quiet}" == "--quiet" ]] || echo "==> Seeding deterministic instance, admin user, repos, plans and backup history..."
+    seed_env seed
+    [[ "${quiet}" == "--quiet" ]] || echo "==> Seed complete."
+}
+
+cmd_verify() {
+    require_running
+    echo "==> Verifying pinned restic and seeded backrest state..."
+
+    local restic_version
+    restic_version="$(compose_env exec -T backrest /usr/local/bin/restic version | awk '{print $2}')"
+    if [[ "${restic_version}" != "0.19.1" ]]; then
+        echo "Error: container restic is ${restic_version}, expected 0.19.1." >&2
+        exit 1
+    fi
+    echo "    restic:  ${restic_version} (pinned, BACKREST_RESTIC_COMMAND)"
+
+    local repo_uri
+    for repo_uri in "${REPO_URIS[@]}"; do
+        if ! compose_env exec -T backrest test -f "${repo_uri}/config"; then
+            echo "Error: ${repo_uri} is not an initialized restic repository." >&2
+            exit 1
+        fi
+    done
+    echo "    repos:   ${REPO_URIS[*]} initialized on disk"
+
+    seed_env verify
+    echo "==> Verify passed."
+}
+
+cmd_reset() {
+    echo "==> Resetting environment..."
+    compose_env down -v --remove-orphans || true
+    echo "==> Reset complete (containers and config/data/cache/repos volumes removed). Run 'deploy' to start fresh."
+}
+
+cmd_stop() {
+    echo "==> Stopping container (volumes preserved)..."
+    compose_env down
+}
+
+cmd_logs() {
+    compose_env logs -f --tail 100 "$@"
+}
+
+cmd_status() {
+    if compose_env ps --status running --format '{{.Name}}' 2>/dev/null | grep -qx "${CONTAINER_NAME}"; then
+        echo "Status: RUNNING"
+        echo "URL: http://localhost:${PORT}/"
+        echo "Browser URL: ${TESTER_ENV_BROWSER_ORIGIN:-http://host.docker.internal:${PORT}/}"
+        echo "Container: ${CONTAINER_NAME}"
+        echo "Image: ${IMAGE_NAME}"
+        echo "Login: ${ADMIN_USER} / ${ADMIN_PASSWORD}"
+    else
+        echo "Status: NOT RUNNING"
+    fi
+}
+
+cmd_url() {
+    echo "http://localhost:${PORT}/"
+    echo "browser: ${TESTER_ENV_BROWSER_ORIGIN:-http://host.docker.internal:${PORT}/}"
+}
+
+cmd_help() {
+    cat <<EOF
+Backrest - Tester Environment CLI
+
+Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+
+Commands:
+  deploy    Build the image from source, start the container, seed deterministic state (alias: up)
+  seed      Re-run the idempotent deterministic seed (instance, admin, repos, plans, backups)
+  verify    Assert health, login gate, pinned restic, seeded config/snapshots/operations/dashboard
+  reset     Remove containers and the config/data/cache/repos volumes (down -v)
+  stop      Stop the container and keep volumes (alias: down)
+  logs      Follow container logs
+  status    Show whether the app is running and on which port
+  url       Print the host URL and the browser-visible URL
+  help      Show this help
+
+Options:
+  --run-id <id>   Isolate container and compose project/volumes for parallel runs. Default: default
+  --port <port>   Host port to bind to container port 9898. Default: 9898
+
+Typical workflow:
+  ./tester-env deploy    # Build, start, seed
+  ./tester-env verify    # Check seeded state
+  ./tester-env reset     # Clean slate
+
+Deployment details:
+  - Baseline: v1.14.1 (875c9cb51e626a75276a64da42c6a9ec0695010a)
+  - Dockerfile.tester-env is fork-owned: node/pnpm + vite build -> Go CGO-free
+    build with //go:embed dist -> alpine runtime with restic 0.19.1 pinned.
+  - restic is baked into the image and BACKREST_RESTIC_COMMAND points at it, so
+    the first-run download path never runs; runtime is offline.
+  - State lives in compose-scoped named volumes mounted at /config, /data,
+    /cache and /repos; ./tester-env reset drops all of them.
+  - Deterministic setup: instance ${INSTANCE_NAME}, user ${ADMIN_USER} / ${ADMIN_PASSWORD},
+    two local restic repos (workshop-nas at /repos/workshop-nas, cold-archive at
+    /repos/cold-archive), three plans over the committed fixture tree with their
+    schedules disabled: documents (2 pre-run snapshots, keep-last 5, *.tmp and
+    ~\$* excluded), project-files (1 snapshot, keep-last 10) and photo-archive
+    (1 snapshot, monthly-bucketed retention), plus one repo stats and one repo
+    check operation so the dashboard, plan, repo and operation views are populated.
+  - Fixtures backing the seeded plans live in the image at /fixtures (read-only,
+    small Lakeside Workshop business files under /fixtures/documents,
+    /fixtures/projects and /fixtures/media); restore targets default to /restore.
+
+Environment:
+  IMAGE_TAG              Content-addressed image tag exported by scripts/rl-env
+  TESTER_ENV_BROWSER_ORIGIN  Browser-visible origin for container browsers
+  PORT                   Host port (same as --port)
+
+Caveats:
+  - Backup/restore operations are real async restic runs; snapshot ids and
+    timestamps are nondeterministic, so assert counts/statuses/paths instead.
+  - Schedules are seeded disabled, so no cron backup fires during a run.
+  - Remote backends (S3/B2/GCS/SFTP) and notifications stay out of scope;
+    only local-path repositories are wired.
+EOF
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run-id)
+                RUN_ID="${2:?--run-id requires a value}"
+                shift 2
+                ;;
+            --port)
+                PORT="${2:?--port requires a value}"
+                shift 2
+                ;;
+            --help|-h)
+                cmd_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                cmd_help
+                exit 1
+                ;;
+        esac
+    done
+
+    refresh_names
+
+    case "${cmd}" in
+        deploy|up) cmd_deploy ;;
+        seed) cmd_seed ;;
+        verify) cmd_verify ;;
+        reset) cmd_reset ;;
+        stop|down) cmd_stop ;;
+        logs) cmd_logs ;;
+        status) cmd_status ;;
+        url) cmd_url ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            echo "Unknown command: ${cmd}" >&2
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
