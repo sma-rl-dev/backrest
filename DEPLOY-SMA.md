@@ -123,6 +123,13 @@ every seeded operation and as the `created-by:lakeside-workshop` snapshot tag).
 
 All three schedules are `{disabled: true, clock: CLOCK_LOCAL}`.
 
+`workshop-nas` also carries the Add Repo dialog's default repo-level forget
+policy (`forgetPolicy`: schedule `{disabled: true, clock: CLOCK_LAST_RUN_TIME}`,
+retention time-bucketed hourly 24 / daily 30 / monthly 12): configured but never
+scheduled, so per-plan retention still drives the per-backup forgets and the repo
+action menu offers `Forget Now` for `workshop-nas` only (`cold-archive` has no
+`forgetPolicy`).
+
 History: the 4 real restic backups produce 4 snapshots and
 `Backup` + `Snapshot` + `Forget` operations (12), plus one repo `Stats` task on
 `workshop-nas` and one repo `Check` task on `cold-archive` — 14 operations, all
@@ -148,7 +155,8 @@ The `documents` snapshot reports **4** processed files (not 5) because
 
 `verify` asserts, without a browser: SPA shell 200; `GetConfig` 401 without a
 token; admin login OK and wrong password 401; instance/auth user; both repos
-with expected URIs and 64-hex GUIDs; all three plans with repo/paths/excludes/
+with expected URIs and 64-hex GUIDs plus `workshop-nas`' disabled repo forget
+policy (and its absence on `cold-archive`); all three plans with repo/paths/excludes/
 disabled schedule/retention; snapshot counts ≥ 2/1/1 with matching paths,
 `plan:<id>` + `created-by:lakeside-workshop` tags and fixture file counts 4/6/3;
 successful backup/index/forget counts; stats op for `workshop-nas` and check op

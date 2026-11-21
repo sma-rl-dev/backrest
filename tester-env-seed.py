@@ -4,7 +4,9 @@
 Talks to the backrest ConnectRPC JSON API from the host (no browser involved).
 
   seed   - first-run config (instance name), deterministic admin user via the
-           server-side bcrypt hashing RPC, two local restic repositories, three
+           server-side bcrypt hashing RPC, two local restic repositories
+           (workshop-nas carrying the Add Repo dialog's default disabled
+           forget policy), three
            plans over the committed /fixtures tree with schedules disabled, and
            a small pre-run backup history (2 + 1 + 1 snapshots) plus one repo
            stats and one repo check operation so the dashboard, plan, repo and
@@ -36,11 +38,21 @@ ADMIN_PASSWORD = os.environ.get("BACKREST_ADMIN_PASSWORD", "BackrestAdmin!2026")
 
 # Fixture theme: Lakeside Workshop, a small furniture workshop whose documents,
 # client projects and build photos live under /fixtures (read-only, image-baked).
+# The Add Repo dialog gives every new repo the same forget policy: a disabled
+# schedule plus a time-bucketed retention (webui AddRepoModal repoDefaults). The
+# disabled schedule means the repo-level forget never fires, so the per-plan
+# forget follow-ups after each backup keep applying plan retention.
+REPO_FORGET_POLICY = {
+    "schedule": {"disabled": True, "clock": "CLOCK_LAST_RUN_TIME"},
+    "retention": {"policyTimeBucketed": {"hourly": 24, "daily": 30, "monthly": 12}},
+}
+
 REPOS = [
     {
         "id": "workshop-nas",
         "uri": "/repos/workshop-nas",
         "password": "lakeside-nas-2026",
+        "forgetPolicy": REPO_FORGET_POLICY,
     },
     {
         "id": "cold-archive",
@@ -290,19 +302,11 @@ def seed() -> None:
     for repo in REPOS:
         if repo["id"] in existing_repos:
             continue
-        config = rpc(
-            "Backrest",
-            "AddRepo",
-            {
-                "repo": {
-                    "id": repo["id"],
-                    "uri": repo["uri"],
-                    "password": repo["password"],
-                }
-            },
-            token,
-        )
-        print(f"    repo: initialized {repo['id']!r} at {repo['uri']}")
+        fields = ("id", "uri", "password", "forgetPolicy")
+        payload = {key: repo[key] for key in fields if key in repo}
+        config = rpc("Backrest", "AddRepo", {"repo": payload}, token)
+        note = " with the default disabled forget policy" if "forgetPolicy" in repo else ""
+        print(f"    repo: initialized {repo['id']!r} at {repo['uri']}{note}")
 
     # --- plans over the fixture tree, schedules disabled --------------------
     config = get_config(token)
@@ -434,6 +438,15 @@ def verify() -> None:
             )
         else:
             repo_guids[wanted["id"]] = repo["guid"]
+        wanted_forget = wanted.get("forgetPolicy")
+        forget = repo.get("forgetPolicy")
+        if wanted_forget is None:
+            if forget is not None:
+                errors.append(f"repo {wanted['id']!r} has an unexpected forgetPolicy: {forget!r}")
+        elif forget != wanted_forget:
+            errors.append(
+                f"repo {wanted['id']!r} forgetPolicy is {forget!r}, expected {wanted_forget!r}"
+            )
 
     # --- plans --------------------------------------------------------------
     plans = {plan.get("id"): plan for plan in config.get("plans") or []}
@@ -604,7 +617,8 @@ def verify() -> None:
     print(
         "    verified: SPA shell 200, login gate 401 + admin login, wrong password rejected,"
         f" instance={INSTANCE_NAME!r},"
-        f" repos={sorted(repos)} (initialized),"
+        f" repos={sorted(repos)} (initialized; workshop-nas forget policy disabled"
+        " with hourly 24 / daily 30 / monthly 12 retention),"
         f" plans={sorted(plans)} (schedule disabled),"
         f" snapshots={dict(sorted(snapshot_counts.items()))},"
         f" backups={dict(sorted(per_plan_backups.items()))},"
